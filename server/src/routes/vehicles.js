@@ -59,8 +59,15 @@ router.put('/:id', (req, res) => {
 
   let status = req.body.status != null ? req.body.status : existing.status;
 
-  if (existing.status === 'offline' && status === 'online') {
-    return res.status(400).json({ error: '质检未通过车辆处于下线锁定状态，须重新镟修并质检合格后方可上线' });
+  if (existing.status === 'offline') {
+    if (status !== 'offline' && req.body.status != null) {
+      return res.status(400).json({
+        error: '下线锁定(offline)车辆禁止通过编辑直接变更状态。必须走完整流程：重新排程→完成镟修→质检合格，方可自动恢复上线。'
+      });
+    }
+    if (status === 'online') {
+      return res.status(400).json({ error: '质检未通过车辆处于下线锁定状态，须重新镟修并质检合格后方可上线' });
+    }
   }
   if (existing.status === 'maintaining' && req.body.status == null) {
     status = 'maintaining';

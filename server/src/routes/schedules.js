@@ -38,7 +38,9 @@ router.post('/', (req, res) => {
   const vehicle = db.prepare('SELECT * FROM vehicles WHERE id = ?').get(vehicle_id);
   if (!vehicle) return res.status(400).json({ error: '车辆不存在' });
   if (vehicle.status === 'maintaining') return res.status(400).json({ error: '该车辆正在镟修中，不可重复排程' });
-  if (vehicle.status === 'offline') return res.status(400).json({ error: '该车辆下线锁定，须质检合格后处理' });
+  if (!['online', 'waiting', 'offline'].includes(vehicle.status)) {
+    return res.status(400).json({ error: `车辆当前状态(${vehicle.status})不可排程` });
+  }
 
   let machine = null;
   if (machine_id) {
@@ -58,7 +60,7 @@ router.post('/', (req, res) => {
      VALUES (?, ?, ?, 'pending', ?, ?, ?)`
   ).run(vehicle_id, machine_id || null, schedule_date || null, vehicle.priority_flag || 0, operator || null, remark || null);
 
-  if (vehicle.status === 'online') {
+  if (vehicle.status === 'online' || vehicle.status === 'offline') {
     db.prepare("UPDATE vehicles SET status = 'waiting', updated_at = datetime('now','localtime') WHERE id = ?").run(vehicle_id);
   }
 
