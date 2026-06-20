@@ -2,262 +2,402 @@ import { useState } from 'react'
 import { api } from '../api/client.js'
 import { useAsync } from '../lib/useAsync.js'
 import { useRole } from '../lib/role.jsx'
-import { SectionTitle, Pill, Badge, Loading, EmptyState, ErrorBanner } from '../lib/ui.jsx'
-import { INSPECTION_RESULT, fmtNum, diffTone } from '../lib/format.js'
+import { SectionTitle, Pill, Badge, Loading, EmptyState, ErrorBanner, Modal, Field } from '../lib/ui.jsx'
+import { INSPECTION_RESULT, DIMENSION_REVIEW_STATUS, REWORK_TASK_STATUS, fmtNum, diffTone } from '../lib/format.js'
 
 export default function Inspections() {
-  const { can } = useRole()
-  const editable = can('manageInspections')
-  const { data: rows, loading, error, reload } = useAsync(api.inspections, [])
-  const { data: params } = useAsync(api.sysparams, [])
-  const [drafts, setDrafts] = useState({})
-  const [saving, setSaving] = useState(null)
+  const { can, role } = useRole()
+  const editable = can('createInspections')
+  const canApprove = can('approveInspections') || role === 'chief'
+  const { data: rows, loading, error, reload, setData } = useAsync(api.inspections, [])
+  const { data: vehicles } = useAsync(api.vehicles, [])
+  const { data: schedules } = useAsync(api.schedules, [])
+
+  const [modal, setModal] = useState(null)
+  const [form, setForm] = useState({})
+  const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
+  const [reviewModal, setReviewModal] = useState(null)
+  const [reviewData, setReviewData] = useState(null)
+  const [reviewForm, setReviewForm] = useState({ status: 'pass', remark: '' })
 
-  const threshold = Number(params?.find((p) => p.param_key === 'wheel_diameter_diff_threshold')?.param_value) || 3.0
-
-  const draft = (i) =>
-    drafts[i.id] || {
-      post_diameter_left: i.post_diameter_left ?? '',
-      post_diameter_right: i.post_diameter_right ?? '',
-      result: 'pass',
-      inspector: i.inspector || '',
+  const openCreate = () => {
+    const waiting = (schedules || []).filter((s) => s.status === 'in_progress' || s.status === 'completed')
+    setForm({
+      vehicle_id: vehicles?.[0]?.id || '',
+      schedule_id: waiting[0]?.id || '',
+      inspector: '',
+      result: 'pending',
+      pre_left_diameter: '',
+      pre_right_diameter: '',
+      post_left_diameter: '',
+      post_right_diameter: '',
+      wear_left: '',
+      wear_right: '',
       remark: '',
-    }
-  const setDraft = (id, patch) => setDrafts((d) => ({ ...d, [id]: { ...draft({ id, ...drafts[id] }), ...patch } }))
-
-  const postDiff = (i) => {
-    const d = drafts[i.id] || {}
-    const l = Number(d.post_diameter_left)
-    const r = Number(d.post_diameter_right)
-    if (d.post_diameter_left === '' || d.post_diameter_right === '' || Number.isNaN(l) || Number.isNaN(r)) return null
-    return Math.abs(l - r)
-  }
-
-  const getBlockReasons = (i) => {
-    const reasons = []
-    if (i.vehicle_status && i.vehicle_status !== 'waiting') {
-      const map = { online: '已上线', offline: '下线锁定', maintaining: '镟修中', pending: '待排程' }
-      reasons.push(`当前车辆状态为「${map[i.vehicle_status] || i.vehicle_status}」，仅「待质检」(waiting)状态可进行质检判定。${i.vehicle_status === 'offline' ? '下线锁定车辆必须重新排程、完成镟修、由新排程自动生成新质检记录后方可判定合格。' : ''}`)
-    }
-    if (i.schedule_id && i.schedule_status && i.schedule_status !== 'completed') {
-      const map = { pending: '待执行', in_progress: '镟修中', cancelled: '已取消' }
-      reasons.push(`关联排程状态为「${map[i.schedule_status] || i.schedule_status}」，仅「已完成」(completed)排程可进行质检判定。`)
-    }
-    return reasons
-  }
-
-  const isSameScheduleAsLastFail = (i) =>
-    i.last_fail_schedule_id != null && String(i.last_fail_schedule_id) === String(i.schedule_id)
-
-  const getPassBlockReason = (i) => {
-    if (i.last_adjudication === 'fail' && isSameScheduleAsLastFail(i)) {
-      return '该待质检记录与历史最后一次不合格结论同属一条排程，同排程不允许先判不合格再判合格。必须重新创建新排程、完成镟修后，由新排程自动生成的新质检记录方可判定为合格。'
-    }
-    return null
-  }
-
-  const confirm = async (i) => {
-    const d = draft(i)
-
-    const blocks = getBlockReasons(i)
-    if (blocks.length > 0) {
-      setErr('无法提交质检：\n' + blocks.map((b, idx) => `${idx + 1}. ${b}`).join('\n'))
-      return
-    }
-    if (d.result === 'pass') {
-      const pb = getPassBlockReason(i)
-      if (pb) {
-        setErr('无法判定为合格：' + pb)
-        return
-      }
-    }
-    if (d.post_diameter_left === '' || d.post_diameter_right === '') {
-      setErr('请录入修后左右轮径')
-      return
-    }
-    setSaving(i.id)
+    })
     setErr(null)
+    setModal({ mode: 'create' })
+  }
+
+  const openEdit = (i) => {
+    setForm({
+      vehicle_id: i.vehicle_id,
+      schedule_id: i.schedule_id || '',
+      inspector: i.inspector || '',
+      result: i.result || 'pending',
+      pre_left_diameter: i.pre_left_diameter ?? '',
+      pre_right_diameter: i.pre_right_diameter ?? '',
+      post_left_diameter: i.post_left_diameter ?? '',
+      post_right_diameter: i.post_right_diameter ?? '',
+      wear_left: i.wear_left ?? '',
+      wear_right: i.wear_right ?? '',
+      remark: i.remark || '',
+    })
+    setErr(null)
+    setModal({ mode: 'edit', id: i.id })
+  }
+
+  const submit = async () => {
+    setSaving(true)
+    setErr(null)
+    const num = (v) => (v === '' || v == null ? null : Number(v))
+    const body = {
+      vehicle_id: Number(form.vehicle_id),
+      schedule_id: form.schedule_id ? Number(form.schedule_id) : null,
+      inspector: (form.inspector || '').trim() || null,
+      result: form.result || 'pending',
+      pre_left_diameter: num(form.pre_left_diameter),
+      pre_right_diameter: num(form.pre_right_diameter),
+      post_left_diameter: num(form.post_left_diameter),
+      post_right_diameter: num(form.post_right_diameter),
+      wear_left: num(form.wear_left),
+      wear_right: num(form.wear_right),
+      remark: form.remark || null,
+    }
     try {
-      await api.updateInspection(i.id, {
-        post_diameter_left: Number(d.post_diameter_left),
-        post_diameter_right: Number(d.post_diameter_right),
-        result: d.result || 'pending',
-        inspector: (d.inspector || '').trim() || null,
-        remark: (d.remark || '').trim() || null,
-      })
-      setDrafts((x) => {
-        const { [i.id]: _, ...rest } = x
-        return rest
-      })
+      if (modal.mode === 'create') {
+        await api.createInspection(body)
+      } else {
+        await api.updateInspection(modal.id, body)
+      }
+      setModal(null)
       reload()
     } catch (e) {
       setErr(e.message)
     } finally {
-      setSaving(null)
+      setSaving(false)
+    }
+  }
+
+  const loadReviews = async (i) => {
+    setReviewModal({ id: i.id, vehicle_no: i.vehicle_no })
+    setReviewForm({ status: 'pass', remark: '' })
+    setReviewData({ loading: true })
+    try {
+      const data = await api.inspectionReviews(i.id)
+      setReviewData(data)
+    } catch (e) {
+      setReviewData({ error: e.message })
+    }
+  }
+
+  const submitReview = async () => {
+    if (!reviewForm.remark || !reviewForm.remark.trim()) {
+      alert('请输入复核意见')
+      return
+    }
+    try {
+      await api.createDimensionReview(reviewModal.id, {
+        status: reviewForm.status,
+        remark: reviewForm.remark,
+        reviewer: '当前用户',
+      })
+      reload()
+      loadReviews({ id: reviewModal.id, vehicle_no: reviewModal.vehicle_no })
+    } catch (e) {
+      alert(e.message)
     }
   }
 
   if (loading || !rows) return <Loading />
 
-  const counts = {
-    pending: rows.filter((r) => r.result === 'pending').length,
-    pass: rows.filter((r) => r.result === 'pass').length,
-    fail: rows.filter((r) => r.result === 'fail').length,
+  const stats = {
+    total: rows.length,
+    pending: rows.filter((i) => i.result === 'pending').length,
+    pass: rows.filter((i) => i.result === 'pass').length,
+    fail: rows.filter((i) => i.result === 'fail').length,
   }
 
   return (
     <div>
       <SectionTitle
-        title="质检确认"
-        desc="质检员录入修后轮径并判定 · 合格上线 / 不合格下线锁定"
-        right={<Badge tone="amber">阈值 {threshold}mm</Badge>}
+        title="尺寸质检"
+        desc="修前/修后轮径与磨耗录入 · 质检员判定 · 主管尺寸复核 · 不合格自动返修"
+        right={editable && <button className="btn btn-primary" onClick={openCreate}>+ 新增质检</button>}
       />
-      {error && <ErrorBanner message={error} onDismiss={() => setErr(null)} />}
-      {err && <ErrorBanner message={err} onDismiss={() => setErr(null)} />}
+      {error && <ErrorBanner message={error} />}
 
-      <div className="mb-4 grid grid-cols-3 gap-3">
-        <div className="panel p-3"><div className="text-[11px] text-steel-400">待质检</div><div className="stat-num text-2xl text-signal-pending">{counts.pending}</div></div>
-        <div className="panel p-3"><div className="text-[11px] text-steel-400">合格</div><div className="stat-num text-2xl text-signal-online">{counts.pass}</div></div>
-        <div className="panel p-3"><div className="text-[11px] text-steel-400">不合格</div><div className="stat-num text-2xl text-signal-offline">{counts.fail}</div></div>
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {[
+          { label: '质检总数', value: stats.total, tone: 'text-steel-200' },
+          { label: '待判定', value: stats.pending, tone: 'text-signal-pending' },
+          { label: '合格', value: stats.pass, tone: 'text-signal-online' },
+          { label: '不合格', value: stats.fail, tone: 'text-signal-offline' },
+        ].map((c) => (
+          <div key={c.label} className="panel !p-3">
+            <div className="text-[10px] uppercase tracking-wider text-steel-400">{c.label}</div>
+            <div className={`stat-num ${c.tone}`}>{c.value}</div>
+          </div>
+        ))}
       </div>
 
-      <div className="space-y-3">
-        {rows.map((i) => {
-          const isPending = i.result === 'pending'
-          const d = draft(i)
-          const pdiff = postDiff(i)
-          const preDiff = i.pre_diameter_left != null && i.pre_diameter_right != null ? Math.abs(i.pre_diameter_left - i.pre_diameter_right) : null
-          const savedDiff = i.post_diameter_diff
-          const blocks = getBlockReasons(i)
-          const qcDisabled = !editable || blocks.length > 0 || saving === i.id
-          const passBlocked = getPassBlockReason(i)
-          return (
-            <div key={i.id} className={`panel p-4 ${i.result === 'fail' ? 'border-signal-offline/40' : ''}`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="h-title text-base text-steel-200">{i.vehicle_no}</span>
-                      {i.priority_flag ? <Badge tone="red">优先</Badge> : null}
-                      {i.vehicle_status === 'offline' && <Badge tone="red">🔒 下线锁定</Badge>}
-                    </div>
-                    <div className="text-[11px] text-steel-400">
-                      排程 #{i.schedule_id} · {i.machine_no || '未分配机位'} · {i.schedule_date || '—'}
-                      {i.vehicle_status ? ` · 车辆：${({online:'已上线', waiting:'待质检', maintaining:'镟修中', offline:'下线锁定'})[i.vehicle_status] || i.vehicle_status}` : ''}
-                      {i.schedule_status ? ` · 排程：${({pending:'待执行', in_progress:'镟修中', completed:'已完成', cancelled:'已取消'})[i.schedule_status] || i.schedule_status}` : ''}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Pill map={INSPECTION_RESULT} status={i.result} />
-                  {i.result === 'fail' && <span className="text-[11px] text-signal-offline">🔒 车辆已下线锁定</span>}
-                  {i.result === 'pass' && <span className="text-[11px] text-signal-online">✓ 车辆已上线</span>}
-                </div>
-              </div>
-
-              {isPending && blocks.length > 0 && (
-                <div className="mt-3 rounded-md border border-amber-700/40 bg-amber-900/10 p-3 text-[12px] text-amber-300">
-                  <div className="mb-1 font-semibold text-amber-400">⚠️ 该质检记录当前不可提交判定：</div>
-                  <ul className="list-disc space-y-1 pl-5">
-                    {blocks.map((b, idx) => <li key={idx} className="whitespace-pre-line">{b}</li>)}
-                  </ul>
-                </div>
-              )}
-
-              {isPending && passBlocked && !blocks.length && (
-                <div className="mt-3 rounded-md border border-red-700/40 bg-red-900/10 p-3 text-[12px] text-red-300">
-                  <div className="mb-1 font-semibold text-red-400">🚫 该记录禁止判定为合格（不合格判定不受影响）</div>
-                  <div className="whitespace-pre-line">{passBlocked}</div>
-                </div>
-              )}
-
-              <div className="mt-3 grid gap-4 lg:grid-cols-2">
-                <div className="border border-base-800 bg-base-900/50 p-3">
-                  <div className="mb-2 text-[11px] uppercase tracking-wider text-steel-400">修前轮径</div>
-                  <div className="grid grid-cols-3 gap-2 text-sm">
-                    <div><div className="text-[10px] text-steel-400">左</div><div className="font-mono text-steel-300">{fmtNum(i.pre_diameter_left)} mm</div></div>
-                    <div><div className="text-[10px] text-steel-400">右</div><div className="font-mono text-steel-300">{fmtNum(i.pre_diameter_right)} mm</div></div>
-                    <div>
-                      <div className="text-[10px] text-steel-400">差值</div>
-                      <div className={`font-mono ${diffTone(preDiff, threshold).text}`}>{fmtNum(preDiff, 2)} mm</div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border border-base-800 bg-base-900/50 p-3">
-                  <div className="mb-2 text-[11px] uppercase tracking-wider text-steel-400">修后轮径</div>
-                  {isPending && editable ? (
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <div className="text-[10px] text-steel-400">左</div>
-                        <input type="number" step="0.01" className="input !py-1 text-sm" value={d.post_diameter_left} onChange={(e) => setDraft(i.id, { post_diameter_left: e.target.value })} placeholder="mm" disabled={qcDisabled} />
+      <div className="panel">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-base-700 text-left text-[11px] uppercase tracking-wider text-steel-400">
+                <th className="px-4 py-2.5">车辆</th>
+                <th className="px-4 py-2.5">判定</th>
+                <th className="px-4 py-2.5">修前(左/右)</th>
+                <th className="px-4 py-2.5">修后(左/右)</th>
+                <th className="px-4 py-2.5">磨耗(左/右)</th>
+                <th className="px-4 py-2.5">质检员</th>
+                <th className="px-4 py-2.5">复核</th>
+                <th className="px-4 py-2.5">返修</th>
+                <th className="px-4 py-2.5">时间</th>
+                <th className="px-4 py-2.5 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((i) => {
+                const preTone = diffTone(
+                  i.pre_left_diameter != null && i.pre_right_diameter != null
+                    ? Math.abs(i.pre_left_diameter - i.pre_right_diameter)
+                    : null
+                )
+                const postTone = diffTone(
+                  i.post_left_diameter != null && i.post_right_diameter != null
+                    ? Math.abs(i.post_left_diameter - i.post_right_diameter)
+                    : null
+                )
+                return (
+                  <tr key={i.id} className="table-row">
+                    <td className="px-4 py-2.5">
+                      <span className="font-mono text-steel-200">{i.vehicle_no}</span>
+                      {i.is_recheck && <span className="ml-1 text-[10px] text-signal-pending">复核</span>}
+                    </td>
+                    <td className="px-4 py-2.5"><Pill map={INSPECTION_RESULT} status={i.result} /></td>
+                    <td className="px-4 py-2.5">
+                      <div className="font-mono text-xs text-steel-300">
+                        {fmtNum(i.pre_left_diameter)} / {fmtNum(i.pre_right_diameter)}
                       </div>
-                      <div>
-                        <div className="text-[10px] text-steel-400">右</div>
-                        <input type="number" step="0.01" className="input !py-1 text-sm" value={d.post_diameter_right} onChange={(e) => setDraft(i.id, { post_diameter_right: e.target.value })} placeholder="mm" disabled={qcDisabled} />
+                      {i.pre_left_diameter != null && i.pre_right_diameter != null && (
+                        <div className={`text-[10px] ${preTone.text}`}>
+                          差 {Math.abs(i.pre_left_diameter - i.pre_right_diameter).toFixed(2)} ({preTone.label})
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="font-mono text-xs text-steel-300">
+                        {fmtNum(i.post_left_diameter)} / {fmtNum(i.post_right_diameter)}
                       </div>
-                      <div>
-                        <div className="text-[10px] text-steel-400">差值</div>
-                        <div className={`font-mono text-sm pt-2 ${diffTone(pdiff, threshold).text}`}>{pdiff != null ? `${pdiff.toFixed(2)} mm` : '—'}</div>
+                      {i.post_left_diameter != null && i.post_right_diameter != null && (
+                        <div className={`text-[10px] ${postTone.text}`}>
+                          差 {Math.abs(i.post_left_diameter - i.post_right_diameter).toFixed(2)} ({postTone.label})
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-steel-300">
+                      {fmtNum(i.wear_left)} / {fmtNum(i.wear_right)}
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-steel-400">{i.inspector || '—'}</td>
+                    <td className="px-4 py-2.5">
+                      {i.dimension_review_status && i.dimension_review_status !== 'pending' ? (
+                        <Pill map={DIMENSION_REVIEW_STATUS} status={i.dimension_review_status} />
+                      ) : (
+                        <span className="text-xs text-steel-500">
+                          {i.review_count ? `${i.review_count} 次` : '—'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {i.rework_task_id ? (
+                        <Pill map={REWORK_TASK_STATUS} status={i.rework_task_status || 'pending'} />
+                      ) : (
+                        <span className="text-xs text-steel-500">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-[11px] text-steel-400">{i.created_at || '—'}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <div className="flex justify-end gap-1">
+                        {canApprove && i.result !== 'pending' && (
+                          <button className="btn btn-ghost !px-2 !py-1 text-xs text-signal-waiting" onClick={() => loadReviews(i)}>
+                            尺寸复核
+                          </button>
+                        )}
+                        {editable && (
+                          <>
+                            <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => openEdit(i)}>编辑</button>
+                          </>
+                        )}
                       </div>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-3 gap-2 text-sm">
-                      <div><div className="text-[10px] text-steel-400">左</div><div className="font-mono text-steel-300">{fmtNum(i.post_diameter_left)} mm</div></div>
-                      <div><div className="text-[10px] text-steel-400">右</div><div className="font-mono text-steel-300">{fmtNum(i.post_diameter_right)} mm</div></div>
-                      <div><div className="text-[10px] text-steel-400">差值</div><div className={`font-mono ${diffTone(savedDiff, threshold).text}`}>{fmtNum(savedDiff, 2)} mm</div></div>
-                    </div>
-                  )}
-                </div>
-              </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        {rows.length === 0 && <EmptyState text="暂无质检数据" />}
+      </div>
 
-              {isPending && editable && (
-                <div className="mt-3 flex flex-wrap items-end justify-between gap-3 border-t border-base-800 pt-3">
-                  <div className="flex flex-wrap items-end gap-3">
-                    <div>
-                      <div className="label mb-1">质检人</div>
-                      <input className="input !py-1 !w-40 text-sm" value={d.inspector} onChange={(e) => setDraft(i.id, { inspector: e.target.value })} placeholder="质检员姓名" disabled={qcDisabled} />
-                    </div>
-                    <div>
-                      <div className="label mb-1">判定结果</div>
-                      <select
-                        className="input !py-1 !w-32 text-sm"
-                        value={d.result}
-                        onChange={(e) => setDraft(i.id, { result: e.target.value })}
-                        disabled={qcDisabled}
-                      >
-                        <option value="pass" disabled={!!passBlocked}>合格{passBlocked ? ' (已禁止)' : ''}</option>
-                        <option value="fail">不合格</option>
-                      </select>
-                    </div>
-                    <div>
-                      <div className="label mb-1">备注</div>
-                      <input className="input !py-1 !w-44 text-sm" value={d.remark || ''} onChange={(e) => setDraft(i.id, { remark: e.target.value })} placeholder="可选" disabled={qcDisabled} />
-                    </div>
-                  </div>
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => confirm(i)}
-                    disabled={qcDisabled || (d.result === 'pass' && !!passBlocked)}
-                    title={blocks.length > 0 ? blocks[0] : (d.result === 'pass' && passBlocked) ? passBlocked : ''}
-                  >
-                    {saving === i.id ? '提交中…' : blocks.length > 0 ? '状态异常不可提交' : '确认质检'}
-                  </button>
-                </div>
-              )}
-
-              {i.result !== 'pending' && (
-                <div className="mt-3 border-t border-base-800 pt-2 text-xs text-steel-400">
-                  质检人：{i.inspector || '—'} · 时间：{i.inspected_at || '—'}
-                  {i.remark ? <span className="ml-2 text-steel-300">备注：{i.remark}</span> : null}
-                </div>
-              )}
+      <Modal
+        open={!!modal}
+        onClose={() => setModal(null)}
+        title={modal?.mode === 'create' ? '新增质检记录' : '编辑质检记录'}
+        footer={
+          <>
+            <button className="btn btn-ghost" onClick={() => setModal(null)}>取消</button>
+            <button className="btn btn-primary" onClick={submit} disabled={saving || !form.vehicle_id}>
+              {saving ? '保存中…' : '保存'}
+            </button>
+          </>
+        }
+      >
+        {err && <ErrorBanner message={err} onDismiss={() => setErr(null)} />}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="车辆">
+            <select className="input" value={form.vehicle_id || ''}
+              onChange={(e) => setForm((f) => ({ ...f, vehicle_id: e.target.value }))}>
+              <option value="">请选择车辆</option>
+              {(vehicles || []).map((v) => (
+                <option key={v.id} value={v.id}>{v.vehicle_no}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="关联排程 (可选)">
+            <select className="input" value={form.schedule_id || ''}
+              onChange={(e) => setForm((f) => ({ ...f, schedule_id: e.target.value }))}>
+              <option value="">不关联</option>
+              {(schedules || []).map((s) => (
+                <option key={s.id} value={s.id}>#{s.id} {s.vehicle_no} - {s.machine_name}</option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <Field label="质检员">
+          <input className="input" value={form.inspector || ''}
+            onChange={(e) => setForm((f) => ({ ...f, inspector: e.target.value }))}
+            placeholder="质检员姓名" />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="判定结果">
+            <select className="input" value={form.result || 'pending'}
+              onChange={(e) => setForm((f) => ({ ...f, result: e.target.value }))}>
+              <option value="pending">待判定</option>
+              <option value="pass">合格（放行）</option>
+              <option value="fail">不合格（锁定车辆并生成返修）</option>
+            </select>
+          </Field>
+        </div>
+        <div className="border-t border-base-700 my-3 pt-3">
+          <div className="text-xs text-steel-400 mb-2">修前轮径 (mm)</div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="左轮">
+              <input type="number" step="0.01" className="input" value={form.pre_left_diameter}
+                onChange={(e) => setForm((f) => ({ ...f, pre_left_diameter: e.target.value }))} />
+            </Field>
+            <Field label="右轮">
+              <input type="number" step="0.01" className="input" value={form.pre_right_diameter}
+                onChange={(e) => setForm((f) => ({ ...f, pre_right_diameter: e.target.value }))} />
+            </Field>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <div className="text-xs text-steel-400 mb-2">修后轮径 (mm)</div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="左轮">
+                <input type="number" step="0.01" className="input" value={form.post_left_diameter}
+                  onChange={(e) => setForm((f) => ({ ...f, post_left_diameter: e.target.value }))} />
+              </Field>
+              <Field label="右轮">
+                <input type="number" step="0.01" className="input" value={form.post_right_diameter}
+                  onChange={(e) => setForm((f) => ({ ...f, post_right_diameter: e.target.value }))} />
+              </Field>
             </div>
-          )
-        })}
-      </div>
-      {rows.length === 0 && <EmptyState text="暂无质检记录" />}
+          </div>
+          <div>
+            <div className="text-xs text-steel-400 mb-2">磨耗量 (mm)</div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="左轮">
+                <input type="number" step="0.01" className="input" value={form.wear_left}
+                  onChange={(e) => setForm((f) => ({ ...f, wear_left: e.target.value }))} />
+              </Field>
+              <Field label="右轮">
+                <input type="number" step="0.01" className="input" value={form.wear_right}
+                  onChange={(e) => setForm((f) => ({ ...f, wear_right: e.target.value }))} />
+              </Field>
+            </div>
+          </div>
+        </div>
+        <Field label="备注">
+          <textarea className="input" rows="2" value={form.remark || ''}
+            onChange={(e) => setForm((f) => ({ ...f, remark: e.target.value }))} />
+        </Field>
+      </Modal>
+
+      <Modal
+        open={!!reviewModal}
+        onClose={() => { setReviewModal(null); setReviewData(null) }}
+        title={`尺寸复核 · ${reviewModal?.vehicle_no || ''}`}
+        wide
+      >
+        {reviewData?.loading && <Loading />}
+        {reviewData?.error && <ErrorBanner message={reviewData.error} />}
+        {reviewData && !reviewData.loading && !reviewData.error && (
+          <div>
+            <div className="mb-4 border border-signal-waiting/40 bg-signal-waiting/5 p-3 rounded-sm">
+              <div className="text-xs text-signal-waiting font-semibold mb-2">提交新复核</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="复核结论">
+                  <select className="input" value={reviewForm.status}
+                    onChange={(e) => setReviewForm((f) => ({ ...f, status: e.target.value }))}>
+                    <option value="pass">复核通过</option>
+                    <option value="fail">复核不通过（保持锁定）</option>
+                  </select>
+                </Field>
+              </div>
+              <Field label="复核意见">
+                <textarea className="input" rows="2" value={reviewForm.remark}
+                  onChange={(e) => setReviewForm((f) => ({ ...f, remark: e.target.value }))}
+                  placeholder="请输入复核意见..." />
+              </Field>
+              <div className="flex justify-end">
+                <button className="btn btn-primary" onClick={submitReview}>提交复核</button>
+              </div>
+            </div>
+
+            <div className="text-xs font-semibold text-steel-200 mb-2">复核历史 ({(reviewData || []).length})</div>
+            <div className="space-y-2 max-h-80 overflow-y-auto">
+              {(reviewData || []).length === 0 && <EmptyState text="暂无复核记录" />}
+              {(reviewData || []).map((r) => (
+                <div key={r.id} className="border border-base-700 bg-base-900/40 p-3 rounded-sm">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2">
+                      <Pill map={DIMENSION_REVIEW_STATUS} status={r.status || 'pending'} />
+                      <span className="font-mono text-xs text-steel-300">{r.reviewer || '—'}</span>
+                    </div>
+                    <span className="font-mono text-[11px] text-steel-400">{r.created_at || '—'}</span>
+                  </div>
+                  <div className="text-xs text-steel-300">{r.remark || '—'}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }

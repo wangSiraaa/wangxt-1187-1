@@ -23,7 +23,7 @@ export default function Vehicles() {
   }, [rows, filter])
 
   const openCreate = () => {
-    setForm({ vehicle_no: '', wheel_diameter_left: '', wheel_diameter_right: '', status: 'online' })
+    setForm({ vehicle_no: '', wheel_diameter_left: '', wheel_diameter_right: '', status: 'online', emergency_flag: 0, online_plan_date: '' })
     setErr(null)
     setModal({ mode: 'create' })
   }
@@ -33,6 +33,8 @@ export default function Vehicles() {
       wheel_diameter_left: v.wheel_diameter_left ?? '',
       wheel_diameter_right: v.wheel_diameter_right ?? '',
       status: v.status,
+      emergency_flag: v.emergency_flag || 0,
+      online_plan_date: v.online_plan_date || '',
     })
     setErr(null)
     setModal({ mode: 'edit', id: v.id, locked: v.status === 'offline' })
@@ -46,6 +48,17 @@ export default function Vehicles() {
   }
   const diff = previewDiff()
 
+  const toggleEmergency = async (v) => {
+    const next = v.emergency_flag ? 0 : 1
+    if (next && !confirm(`确认将 ${v.vehicle_no} 标记为紧急车辆？将优先排程并可在保养机位走主管复核。`)) return
+    try {
+      const updated = await api.setVehicleEmergency(v.id, { emergency_flag: next })
+      setData((d) => (d || []).map((x) => (x.id === v.id ? updated : x)))
+    } catch (e) {
+      alert(e.message)
+    }
+  }
+
   const submit = async () => {
     setSaving(true)
     setErr(null)
@@ -54,6 +67,8 @@ export default function Vehicles() {
       wheel_diameter_left: form.wheel_diameter_left === '' ? null : Number(form.wheel_diameter_left),
       wheel_diameter_right: form.wheel_diameter_right === '' ? null : Number(form.wheel_diameter_right),
       status: form.status || 'online',
+      emergency_flag: Number(form.emergency_flag) ? 1 : 0,
+      online_plan_date: form.online_plan_date || null,
     }
     try {
       if (modal.mode === 'create') {
@@ -88,7 +103,7 @@ export default function Vehicles() {
     <div>
       <SectionTitle
         title="车辆档案"
-        desc="调度员录入左右轮径 · 系统自动计算差值与优先级"
+        desc="调度员录入左右轮径 · 系统自动计算差值与优先级 · 维护上线计划与紧急标记"
         right={
           editable && (
             <button className="btn btn-primary" onClick={openCreate}>
@@ -128,6 +143,7 @@ export default function Vehicles() {
                 <th className="px-4 py-2.5">左轮径</th>
                 <th className="px-4 py-2.5">右轮径</th>
                 <th className="px-4 py-2.5">轮径差</th>
+                <th className="px-4 py-2.5">上线计划</th>
                 <th className="px-4 py-2.5">优先级</th>
                 <th className="px-4 py-2.5 text-right">操作</th>
               </tr>
@@ -142,6 +158,9 @@ export default function Vehicles() {
                       {v.status === 'offline' && (
                         <span className="ml-2 text-[10px] text-signal-offline">🔒 锁定</span>
                       )}
+                      {v.emergency_flag && (
+                        <span className="ml-2 text-[10px] text-red-300">🚨 紧急</span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5"><Pill map={VEHICLE_STATUS} status={v.status} /></td>
                     <td className="px-4 py-2.5 font-mono text-steel-300">{fmtNum(v.wheel_diameter_left)}</td>
@@ -150,12 +169,21 @@ export default function Vehicles() {
                       <span className={`stat-num ${tone.text}`}>{fmtNum(v.wheel_diameter_diff, 2)}</span>
                       <span className={`ml-1.5 text-[10px] ${tone.text}`}>{tone.label}</span>
                     </td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-steel-300">{v.online_plan_date || '—'}</td>
                     <td className="px-4 py-2.5">
-                      {v.priority_flag ? <Badge tone="red">优先</Badge> : <span className="text-steel-400">—</span>}
+                      <div className="flex flex-wrap gap-1">
+                        {v.priority_flag ? <Badge tone="amber">超阈优先</Badge> : null}
+                        {v.emergency_flag ? <Badge tone="red">抢修优先</Badge> : null}
+                        {!v.priority_flag && !v.emergency_flag ? <span className="text-steel-400">—</span> : null}
+                      </div>
                     </td>
                     <td className="px-4 py-2.5 text-right">
                       {editable && (
                         <div className="flex justify-end gap-1">
+                          <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => toggleEmergency(v)}
+                            title={v.emergency_flag ? '取消紧急标记' : '标记为紧急车辆'}>
+                            {v.emergency_flag ? '取消紧急' : '标记紧急'}
+                          </button>
                           <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => openEdit(v)}>
                             编辑
                           </button>
@@ -228,17 +256,37 @@ export default function Vehicles() {
             </span>
           </div>
         )}
-        <Field label="车辆状态" hint={modal?.locked ? '该车辆处于下线锁定，质检合格后方可上线' : undefined}>
-          <select
-            className="input"
-            value={form.status || 'online'}
-            onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
-          >
-            <option value="online">上线</option>
-            <option value="waiting">待镟修</option>
-            <option value="maintaining">镟修中</option>
-            <option value="offline">下线锁定</option>
-          </select>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="上线计划日期" hint="用于排程优先级排序">
+            <input
+              type="date"
+              className="input"
+              value={form.online_plan_date || ''}
+              onChange={(e) => setForm((f) => ({ ...f, online_plan_date: e.target.value }))}
+            />
+          </Field>
+          <Field label="车辆状态" hint={modal?.locked ? '该车辆处于下线锁定，质检合格后方可上线' : undefined}>
+            <select
+              className="input"
+              value={form.status || 'online'}
+              onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
+            >
+              <option value="online">上线</option>
+              <option value="waiting">待镟修</option>
+              <option value="maintaining">镟修中</option>
+              <option value="offline">下线锁定</option>
+            </select>
+          </Field>
+        </div>
+        <Field label="紧急标记">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={Number(form.emergency_flag) === 1}
+              onChange={(e) => setForm((f) => ({ ...f, emergency_flag: e.target.checked ? 1 : 0 }))}
+            />
+            <span className="text-steel-200">标记为抢修紧急车辆（可插队，可走保养机位主管复核）</span>
+          </label>
         </Field>
       </Modal>
     </div>

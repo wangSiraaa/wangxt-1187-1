@@ -20,9 +20,19 @@ function recompute(left, right) {
 
 router.get('/', (req, res) => {
   const rows = db.prepare(
-    `SELECT * FROM vehicles ORDER BY priority_flag DESC, wheel_diameter_diff DESC, id ASC`
+    `SELECT * FROM vehicles ORDER BY emergency_flag DESC, priority_flag DESC, 
+      CASE WHEN online_plan_date IS NULL THEN 1 ELSE 0 END, online_plan_date ASC, 
+      wheel_diameter_diff DESC, id ASC`
   ).all();
   res.json(rows);
+});
+
+router.post('/:id/emergency', (req, res) => {
+  const v = db.prepare('SELECT * FROM vehicles WHERE id = ?').get(req.params.id);
+  if (!v) return res.status(404).json({ error: '车辆不存在' });
+  const next = Number(req.body.emergency_flag) ? 1 : 0;
+  db.prepare(`UPDATE vehicles SET emergency_flag = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(next, req.params.id);
+  res.json(db.prepare('SELECT * FROM vehicles WHERE id = ?').get(req.params.id));
 });
 
 router.get('/:id', (req, res) => {
@@ -32,17 +42,18 @@ router.get('/:id', (req, res) => {
 });
 
 router.post('/', (req, res) => {
-  const { vehicle_no, status, operator, remark } = req.body;
+  const { vehicle_no, status, operator, remark, emergency_flag, online_plan_date } = req.body;
   if (!vehicle_no) return res.status(400).json({ error: '车辆编号不能为空' });
   const left = req.body.wheel_diameter_left;
   const right = req.body.wheel_diameter_right;
   const { diff, priority } = recompute(left, right);
   let finalStatus = priority ? 'waiting' : (status || 'online');
+  const emergency = Number(emergency_flag) ? 1 : 0;
   try {
     const info = db.prepare(
-      `INSERT INTO vehicles(vehicle_no, status, wheel_diameter_left, wheel_diameter_right, wheel_diameter_diff, priority_flag)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(vehicle_no, finalStatus, left ?? null, right ?? null, diff, priority);
+      `INSERT INTO vehicles(vehicle_no, status, wheel_diameter_left, wheel_diameter_right, wheel_diameter_diff, priority_flag, emergency_flag, online_plan_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(vehicle_no, finalStatus, left ?? null, right ?? null, diff, priority, emergency, online_plan_date || null);
     res.status(201).json(db.prepare('SELECT * FROM vehicles WHERE id = ?').get(info.lastInsertRowid));
   } catch (e) {
     res.status(400).json({ error: '车辆编号已存在或数据无效: ' + e.message });
@@ -58,6 +69,8 @@ router.put('/:id', (req, res) => {
   const { diff, priority } = recompute(left, right);
 
   let status = req.body.status != null ? req.body.status : existing.status;
+  const emergencyFlag = req.body.emergency_flag != null ? (Number(req.body.emergency_flag) ? 1 : 0) : existing.emergency_flag;
+  const onlinePlanDate = req.body.online_plan_date != null ? (req.body.online_plan_date || null) : existing.online_plan_date;
 
   if (existing.status === 'offline') {
     if (status !== 'offline' && req.body.status != null) {
@@ -77,11 +90,12 @@ router.put('/:id', (req, res) => {
 
   db.prepare(
     `UPDATE vehicles SET vehicle_no = ?, status = ?, wheel_diameter_left = ?, wheel_diameter_right = ?,
-     wheel_diameter_diff = ?, priority_flag = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`
+     wheel_diameter_diff = ?, priority_flag = ?, emergency_flag = ?, online_plan_date = ?,
+     updated_at = datetime('now', 'localtime') WHERE id = ?`
   ).run(
     req.body.vehicle_no != null ? req.body.vehicle_no : existing.vehicle_no,
     status,
-    left, right, diff, priority,
+    left, right, diff, priority, emergencyFlag, onlinePlanDate,
     req.params.id
   );
   res.json(db.prepare('SELECT * FROM vehicles WHERE id = ?').get(req.params.id));

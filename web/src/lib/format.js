@@ -18,6 +18,23 @@ export const SCHEDULE_STATUS = {
   cancelled: { label: '已取消', text: 'text-steel-400', border: 'border-base-600', bg: 'bg-base-800' },
 }
 
+export const SCHEDULE_TYPE = {
+  normal: { label: '常规', text: 'text-steel-300', border: 'border-base-600', bg: 'bg-base-800' },
+  emergency: { label: '抢修', text: 'text-red-300', border: 'border-red-700/60', bg: 'bg-red-900/20' },
+}
+
+export const REWORK_TASK_STATUS = {
+  pending: { label: '待排程', text: 'text-signal-offline', border: 'border-signal-offline/50', bg: 'bg-signal-offline/10' },
+  scheduled: { label: '已排程', text: 'text-signal-waiting', border: 'border-signal-waiting/50', bg: 'bg-signal-waiting/10' },
+  resolved: { label: '已解决', text: 'text-signal-online', border: 'border-signal-online/50', bg: 'bg-signal-online/10' },
+}
+
+export const DIMENSION_REVIEW_STATUS = {
+  pending: { label: '待复核', text: 'text-signal-pending', border: 'border-signal-pending/50', bg: 'bg-signal-pending/10' },
+  pass: { label: '复核通过', text: 'text-signal-online', border: 'border-signal-online/50', bg: 'bg-signal-online/10' },
+  fail: { label: '复核不通过', text: 'text-signal-offline', border: 'border-signal-offline/50', bg: 'bg-signal-offline/10' },
+}
+
 export const INSPECTION_RESULT = {
   pending: { label: '待质检', text: 'text-signal-pending', border: 'border-signal-pending/50', bg: 'bg-signal-pending/10' },
   pass: { label: '合格', text: 'text-signal-online', border: 'border-signal-online/50', bg: 'bg-signal-online/10' },
